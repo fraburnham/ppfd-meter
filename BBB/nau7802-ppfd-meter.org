@@ -1,0 +1,67 @@
+* PPFD meter using 24bit nau7802 ADC
+
+  ADC Datasheet: http://www.nuvoton.com/resource-files/NAU7802%20Data%20Sheet%20V1.7.pdf
+
+  The adc is assumed to be connected to i2c-1.
+
+  Naming note: The datasheet refers to registers as ~REGXX[b]~ where ~XX~ is the hex address (0xXX) and ~b~ is the bit
+  Registry map starts at section 10 (pg 28).
+
+** ADC setup
+
+   * Disable
+   * Ref voltage select
+   * Select internal LDO
+   * Power on
+
+   When power is applied the ADC's registers are all 0x0000 (viewed w/ ~i2cdump -y 1 0x2a w~). To init the device write 0x06 to REG0.
+
+   #+begin_src perl :tangle yes :shebang "#!/usr/bin/perl"
+     system("i2cset -y 1 0x2a 0x00 0x00");
+     system("i2cset -y 1 0x2a 0x01 0x30");
+     system("i2cset -y 1 0x2a 0x00 0x86");
+     # do validation
+   #+end_src
+
+** Reading
+
+   #+begin_src perl :tangle yes
+     while(!(hex(`i2cget -y 1 0x2a 0x00`) & 0x20)) {
+         # wait for data ready
+     }
+   #+end_src
+
+   Per datasheet pg 34
+
+   | Register | Result bits      |
+   | REG0x12  | bit 23 to bit 16 |
+   | REG0x13  | bit 15 to bit 8  |
+   | REG0x14  | bit 7 to bit 0   |
+
+   Shift them up then add to get an unsigned 24bit value (will have to use stm32f103 to have big enough integers to avoid fuckery)
+
+   #+begin_src perl :tangle yes
+     $high = hex(`i2cget -y 1 0x2a 0x12`);
+     $mid = hex(`i2cget -y 1 0x2a 0x13`);
+     $low = hex(`i2cget -y 1 0x2a 0x14`);
+
+     $adc_val = ($high << 16) + ($mid << 8) + $low;
+
+     print("Adc val: ", $adc_val, "\n");
+   #+end_src
+
+** Translating
+
+   Translate the 24bit adc value into mV then umol/m2/s. The reference voltage is 2.7V. Scale to 2700 for easy mV.
+
+   #+begin_src perl :tangle yes
+     $mV = $adc_val * (2900/2**24);
+     $umol = 1.6 * $mV;
+
+     print("mV: ", $mV, "\n");
+     print("umol/m2/s: ", $umol, "\n");
+   #+end_src
+
+** Output via 3x7seg
+
+   Use the led drivers. I think they're i2c also.
