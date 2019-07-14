@@ -15,21 +15,22 @@ my %numbers = (
     7 => [0, 0, 0, 0, 0, 1, 1, 1],
     8 => [0, 1, 1, 1, 1, 1, 1, 1],
     9 => [0, 1, 1, 0, 1, 1, 1, 1],
+    "blank" => [0, 0, 0, 0, 0, 0, 0, 0],
 );
 
 sub setOutput {
     my ($pin) = @_;
 
-    open(my $f, ">", "/sys/class/gpio/export") or die "Failed to export pin $!";
-    print $f "$pin";
-    close $f;
+    open(my $ef, ">", "/sys/class/gpio/export") or die "Failed to export pin $!";
+    print $ef "$pin";
+    close $ef;
 
-    open(my $f, ">", "/sys/class/gpio/gpio$pin/direction") or die "Failed to set pin direction $!";
-    print $f "out";
-    close $f;
+    open(my $df, ">", "/sys/class/gpio/gpio$pin/direction") or die "Failed to set pin direction $!";
+    print $df "out";
+    close $df;
 
-    open($f, ">", "/sys/class/gpio/gpio$pin/value") or die "Failed to get handle to pin value $!";
-    return $f
+    open(my $vf, ">", "/sys/class/gpio/gpio$pin/value") or die "Failed to get handle to pin value $!";
+    return $vf
 }
 sub freePin {
     my ($pin, $pinF) = @_;
@@ -42,7 +43,6 @@ sub freePin {
 }
 sub digitalWrite {
     my ($pinF, $value) = @_;
-
     print $pinF "$value";
     $pinF->flush();
     usleep(1); # hack to keep timing more consistent. Userland gpio is cabbage.
@@ -74,24 +74,42 @@ sub shiftBit {
 sub shiftDigit {
     my ($digit) = @_;
 
-    digitalWrite($oe, 1);
-    
     foreach (0..7) {
         shiftBit($numbers{$digit}[$_]);
     }
+}
+sub shiftNumber {
+    my ($number) = @_;
+
+    my $numberStarted;
+
+    for (my $x = 1000; $x >= 1; $x = $x/10) {
+        my $digit = int($number / $x);
+        $number = $number - ($digit * $x);
+
+        if(!$numberStarted && $digit == 0) {
+            shiftDigit("blank");
+        } elsif (!$numberStarted && $digit > 0) {
+            $numberStarted = 1;
+            shiftDigit($digit);
+        } else {
+            shiftDigit($digit);
+        }
+    }
+}
+
+foreach (0..9) {
+    digitalWrite($oe, 1);
+
+    shiftNumber($_ + (100 * $_));
 
     digitalWrite($le, 1);
     digitalWrite($le, 0);
 
     digitalWrite($oe, 0);
-}
 
-foreach (0..9) {
-    shiftDigit($_);
     sleep(2);
 }
-
-sleep(2);
 
 freePin($sdiPin, $sdi);
 freePin($clkPin, $clk);

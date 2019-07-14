@@ -6,28 +6,68 @@
    Naming note: The datasheet refers to registers as ~REGXX[b]~ where ~XX~ is the hex address (0xXX) and ~b~ is the bit
    Registry map starts at section 10 (pg 28).
 
-   The adc is assumed to be connected to i2c-1.
+   Wiring help https://github.com/Sawaiz/nau7802
+
+   * Using continuous mode, don't need data ready pin
+   * Using internal oscillator, the precision of the meter is much higher than needed. Errors as high as 50ppfd will be ok
+
+   #+begin_src
+          +-------------------------+
+          |                         |
+          |   =========U=========   |
+          ^---|01 REFP   AVDD 16|---^
+       GND----|02 VIN1N  DVDD 15|----3V3
+     Sig 1----|03 VIN1P  SDIO 14|----SDA
+       GND----|04 VIN2N  SCLK 13|----SCL
+       GND----|05 VIN2P  DRDY 12|----
+          ----|06 VBG    XOUT 11|----
+       GND----|07 REFN    XIN 10|----
+       GND----|08 AVSS    DVSS 9|----GND
+              ===================
+   #+end_src
 
    * Disable
    * Ref voltage select
    * Select internal LDO
    * Power on
 
-   When power is applied the ADC's registers are all 0x0000 (viewed w/ ~i2cdump -y 1 0x2a w~). To init the device write 0x06 to REG0.
+   When power is applied the ADC's registers are all 0x0000 (viewed w/ ~i2cdump -y 1 0x2a w~). To init the device write 0x06 to REG0. ~$bus~ is the i2c bus the adc is on.
 
    #+begin_src perl :tangle yes :shebang "#!/usr/bin/perl"
-     system("i2cset -y 1 0x2a 0x00 0x00");
-     system("i2cset -y 1 0x2a 0x01 0x30");
-     system("i2cset -y 1 0x2a 0x00 0x86");
+     use strict;
+     use warnings;
+     use IO::Handle;
+     use Time::HiRes qw(usleep);
+
+     my ($bus) = @ARGV;
+
+     if(not defined $bus) {
+         die "Must have bus\n";
+     }
+
+     system("i2cset -y $bus 0x2a 0x00 0x00");
+     system("i2cset -y $bus 0x2a 0x01 0x30");
+     system("i2cset -y $bus 0x2a 0x00 0x86");
      # do validation
    #+end_src
 
 ** Reading
 
+   Helper trim sub to cleanup output from ~i2cget~s.
+
+   #+begin_src perl :tangle yes
+     sub trim {
+         my ($val) = @_;
+         $val =~ s/^\s+|\s+$//g;
+         return $val;
+     }
+   #+end_src
+
    Check the data ready flag in reg 0x00 to avoid reading before data is ready.
 
    #+begin_src perl :tangle yes
-     while(!(hex(`i2cget -y 1 0x2a 0x00`) & 0x20)) {
+     while(!(hex(trim(`i2cget -y $bus 0x2a 0x00`)) & 0x20)) {
+         usleep(10);
          # wait for data ready
      }
    #+end_src
@@ -42,11 +82,11 @@
    Shift them up then add to get an unsigned 24bit value (will have to use stm32f103 to have big enough integers to avoid fuckery)
 
    #+begin_src perl :tangle yes
-     $high = hex(`i2cget -y 1 0x2a 0x12`);
-     $mid = hex(`i2cget -y 1 0x2a 0x13`);
-     $low = hex(`i2cget -y 1 0x2a 0x14`);
+     my $high = hex(trim(`i2cget -y $bus 0x2a 0x12`));
+     my $mid = hex(trim(`i2cget -y $bus 0x2a 0x13`));
+     my $low = hex(trim(`i2cget -y $bus 0x2a 0x14`));
 
-     $adc_val = ($high << 16) + ($mid << 8) + $low;
+     my $adc_val = ($high << 16) + ($mid << 8) + $low;
 
      print("Adc val: ", $adc_val, "\n");
    #+end_src
@@ -57,11 +97,10 @@
    (Measured voltage is 2.9V, perhaps the best bet would be to read the ref voltage and adjust the scale factor accordingly)
 
    #+begin_src perl :tangle yes
-     $mV = $adc_val * (2900/2**24);
-     $umol = 1.6 * $mV;
+     my $mV = $adc_val * (2900/2**24);
+     my $umol = 1.6 * $mV;
 
-     print("mV: ", $mV, "\n");
-     print("umol/m2/s: ", $umol, "\n");
+     print("umol: ", $umol, "\n");
    #+end_src
 
 ** 7seg "library"
@@ -77,6 +116,8 @@
    Should add a 1us wait anyway (if possible).
 
 
+*** GPIO
+
    Prepare a gpio for output by exporting, setting the direction and returning a handle to the value file (for quicker, more consistent writes).
 
    #+name: set-output
@@ -84,16 +125,16 @@
      sub setOutput {
          my ($pin) = @_;
 
-         open(my $f, ">", "/sys/class/gpio/export") or die "Failed to export pin $!";
-         print $f "$pin";
-         close $f;
+         open(my $ef, ">", "/sys/class/gpio/export") or die "Failed to export pin $!";
+         print $ef "$pin";
+         close $ef;
 
-         open(my $f, ">", "/sys/class/gpio/gpio$pin/direction") or die "Failed to set pin direction $!";
-         print $f "out";
-         close $f;
+         open(my $df, ">", "/sys/class/gpio/gpio$pin/direction") or die "Failed to set pin direction $!";
+         print $df "out";
+         close $df;
 
-         open($f, ">", "/sys/class/gpio/gpio$pin/value") or die "Failed to get handle to pin value $!";
-         return $f
+         open(my $vf, ">", "/sys/class/gpio/gpio$pin/value") or die "Failed to get handle to pin value $!";
+         return $vf
      }
    #+end_src
 
@@ -119,7 +160,6 @@
    #+begin_src perl :noweb yes
      sub digitalWrite {
          my ($pinF, $value) = @_;
-
          print $pinF "$value";
          $pinF->flush();
          usleep(1); # hack to keep timing more consistent. Userland gpio is cabbage.
@@ -160,6 +200,8 @@
      digitalWrite($oe, 1);
    #+end_src
 
+*** Shifting data
+
    * Set SDI value
    * Clock high
    * Short wait
@@ -185,44 +227,61 @@
 
    #+name: number-bits
    #+begin_src perl :noweb yes
-     my %numbers = (
-         0 => [0, 0, 1, 1, 1, 1, 1, 1],
-         1 => [0, 0, 0, 0, 0, 1, 1, 0],
-         2 => [0, 1, 0, 1, 1, 0, 1, 1],
-         3 => [0, 1, 0, 0, 1, 1, 1, 1],
-         4 => [0, 1, 1, 0, 0, 1, 1, 0],
-         5 => [0, 1, 1, 0, 1, 1, 0, 1],
-         6 => [0, 1, 1, 1, 1, 1, 0, 1],
-         7 => [0, 0, 0, 0, 0, 1, 1, 1],
-         8 => [0, 1, 1, 1, 1, 1, 1, 1],
-         9 => [0, 1, 1, 0, 1, 1, 1, 1],
-     );
+          my %numbers = (
+              0 => [0, 0, 1, 1, 1, 1, 1, 1],
+              1 => [0, 0, 0, 0, 0, 1, 1, 0],
+              2 => [0, 1, 0, 1, 1, 0, 1, 1],
+              3 => [0, 1, 0, 0, 1, 1, 1, 1],
+              4 => [0, 1, 1, 0, 0, 1, 1, 0],
+              5 => [0, 1, 1, 0, 1, 1, 0, 1],
+              6 => [0, 1, 1, 1, 1, 1, 0, 1],
+              7 => [0, 0, 0, 0, 0, 1, 1, 1],
+              8 => [0, 1, 1, 1, 1, 1, 1, 1],
+              9 => [0, 1, 1, 0, 1, 1, 1, 1],
+              "blank" => [0, 0, 0, 0, 0, 0, 0, 0],
+          );
    #+end_src
 
    The digit shifter shifts out each bit.
-
-   Turns out I made the bits above for common cathode and I have common anode. Fun. So there is an inverting step (optionally) by setting ~$commonCathode~ to ~false~.
 
    #+name: digit-shifter
    #+begin_src perl :noweb yes
      sub shiftDigit {
          my ($digit) = @_;
 
-         digitalWrite($oe, 1);
-         
          foreach (0..7) {
              shiftBit($numbers{$digit}[$_]);
          }
-
-         digitalWrite($le, 1);
-         digitalWrite($le, 0);
-
-         digitalWrite($oe, 0);
      }
    #+end_src
 
-*** TODO Shift number code (shift a number no matter how many digits)
+   Shift out multiple digits setting LE as needed (at the very least after all shifts).
 
+   #+name: number-shifter
+   #+begin_src perl :noweb yes
+     sub shiftNumber {
+         my ($number) = @_;
+
+         my $numberStarted;
+
+         for (my $x = 1000; $x >= 1; $x = $x/10) {
+             my $digit = int($number / $x);
+             $number = $number - ($digit * $x);
+
+             if(!$numberStarted && $digit == 0) {
+                 shiftDigit("blank");
+             } elsif (!$numberStarted && $digit > 0) {
+                 $numberStarted = 1;
+                 shiftDigit($digit);
+             } else {
+                 shiftDigit($digit);
+             }
+         }
+     }
+   #+end_src
+
+*** 7 seg test code
+   
    #+begin_src perl :tangle 7seg.pl :noweb yes
      use strict;
      use warnings;
@@ -239,19 +298,60 @@
 
      <<shift-bit>>
      <<digit-shifter>>
+     <<number-shifter>>
 
      foreach (0..9) {
-         shiftDigit($_);
+         digitalWrite($oe, 1);
+
+         shiftNumber($_ + (100 * $_));
+
+         digitalWrite($le, 1);
+         digitalWrite($le, 0);
+
+         digitalWrite($oe, 0);
+
          sleep(2);
      }
-
-     sleep(2);
 
      freePin($sdiPin, $sdi);
      freePin($clkPin, $clk);
      freePin($oePin, $oe);
      freePin($lePin, $le);
    #+end_src
+
 ** Outputting values via 4x7seg
 
    Output the ppfd int part (rounded up) to the 7segs using ~shiftNumber~ 
+
+   Start w/ some relevant code (keeping the block separate since noweb syntax ruins highlighting)
+
+   #+begin_src perl :tangle yes :noweb yes
+     <<number-bits>>
+
+     <<set-output>>
+     <<free-pin>>
+     <<digital-write>>
+
+     <<prepare-pins>>
+
+     <<shift-bit>>
+     <<digit-shifter>>
+     <<number-shifter>>
+   #+end_src
+
+   Using the value translated above output to the 7segs. Prevent errors from propagating by setting a max value for ~$umol~ based on the sensor max.
+
+   #+begin_src perl :tangle yes
+     if($umol > 4000) {
+         $umol = 0;
+     }
+
+     digitalWrite($oe, 1);
+
+     shiftNumber(int($umol));
+
+     digitalWrite($le, 1);
+     digitalWrite($le, 0);
+     digitalWrite($oe, 0);
+
+   #+end_src
