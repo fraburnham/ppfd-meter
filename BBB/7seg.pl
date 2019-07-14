@@ -1,44 +1,8 @@
-#!/usr/bin/perl
 
 use strict;
 use warnings;
 use IO::Handle;
 use Time::HiRes qw(usleep);
-
-my ($bus) = @ARGV;
-
-if(not defined $bus) {
-    die "Must have bus\n";
-}
-
-system("i2cset -y $bus 0x2a 0x00 0x00");
-system("i2cset -y $bus 0x2a 0x01 0x30");
-system("i2cset -y $bus 0x2a 0x00 0x86");
-# do validation
-
-sub trim {
-    my ($val) = @_;
-    $val =~ s/^\s+|\s+$//g;
-    return $val;
-}
-
-while(!(hex(trim(`i2cget -y $bus 0x2a 0x00`)) & 0x20)) {
-    usleep(10);
-    # wait for data ready
-}
-
-my $high = hex(trim(`i2cget -y $bus 0x2a 0x12`));
-my $mid = hex(trim(`i2cget -y $bus 0x2a 0x13`));
-my $low = hex(trim(`i2cget -y $bus 0x2a 0x14`));
-
-my $adc_val = ($high << 16) + ($mid << 8) + $low;
-
-print("Adc val: ", $adc_val, "\n");
-
-my $mV = $adc_val * (2900/2**24);
-my $umol = 1.6 * $mV;
-
-print("umol: ", $umol, "\n");
 
 my %numbers = (
     0 => [0, 0, 1, 1, 1, 1, 1, 1],
@@ -134,14 +98,20 @@ sub shiftNumber {
     }
 }
 
-if($umol > 4000) {
-    $umol = 0;
+foreach (0..9) {
+    digitalWrite($oe, 1);
+
+    shiftNumber($_ + (100 * $_));
+
+    digitalWrite($le, 1);
+    digitalWrite($le, 0);
+
+    digitalWrite($oe, 0);
+
+    sleep(2);
 }
 
-digitalWrite($oe, 1);
-
-shiftNumber(int($umol));
-
-digitalWrite($le, 1);
-digitalWrite($le, 0);
-digitalWrite($oe, 0);
+freePin($sdiPin, $sdi);
+freePin($clkPin, $clk);
+freePin($oePin, $oe);
+freePin($lePin, $le);
